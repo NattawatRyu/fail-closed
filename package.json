@@ -1,0 +1,12 @@
+{
+  "name": "fail-closed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code hooks that fail closed.",
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

@@ -1,0 +1,4 @@
+node_modules/
+experiments/**/fired.log
+experiments/**/probe-*.txt
+experiments/**/out-*.txt

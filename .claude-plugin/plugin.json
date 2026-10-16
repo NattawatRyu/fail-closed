@@ -1,0 +1,8 @@
+{
+  "name": "fail-closed",
+  "version": "0.1.0",
+  "description": "Claude Code hooks that fail closed: once a session reads text a stranger wrote, every action asks first. Plus a command block that catches chained commands.",
+  "author": { "name": "Nattawat Chimin" },
+  "license": "MIT",
+  "keywords": ["security", "prompt-injection", "hooks", "guardrails"]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "fail-closed",
+  "owner": { "name": "Nattawat Chimin" },
+  "plugins": [
+    {
+      "name": "fail-closed",
+      "source": "./",
+      "description": "Taint gate against prompt injection, and a chain-aware command block."
+    }
+  ]
+}
