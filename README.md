@@ -19,6 +19,30 @@ Reads stay free. Writes, shells, web calls (an exfiltration channel) and every
 MCP tool ask. Once tainted, a session stays tainted — approving one call does
 not make the stranger's text go away.
 
+## Why not just auto mode?
+
+Claude Code's permission modes are chosen once and hold for the whole session.
+fail-closed makes the mode follow what the session has *read*: auto while the
+context is your own, ask from the moment a stranger's text gets in.
+
+| | auto mode | ask / default | fail-closed |
+|---|---|---|---|
+| Decides by | how the action looks | nothing, it always asks | what the session has read |
+| Day-to-day work | smooth | prompt fatigue | smooth |
+| After reading an injected page | the classifier has to spot that the action came from the attacker | asks | asks, every time, without guessing |
+| Who judges | a model, which text can argue with | a fixed rule | a fixed rule |
+
+A good injection asks for something that looks ordinary, like `npm test` or a
+one-line config edit. Judged on how it looks, that action passes. fail-closed
+never looks at the action. It asks because of where the context has been, and
+the prompt names the first untrusted input.
+
+It does not replace auto mode's classifier. It adds a layer next to it. The
+classifier is smart and can be talked to; this rule is dumb and can't be. While
+this was being built, the classifier blocked two actions (creating a public
+repo, spawning a headless agent in `bypassPermissions`) that fail-closed had no
+opinion on. Run both.
+
 ## Why this exists
 
 These hooks were extracted from a personal setup after real incidents, not
@@ -103,10 +127,11 @@ ever answers `allow`: the worst either can do is add a prompt.
 - **Trusted root means "text you or your team wrote".** A freshly cloned
   repository inside your project is a stranger's text. Open such repos as their
   own project, or list their path in `untrustedSubpaths`.
-- **"ask" under every permission mode is not yet verified by this repo.** The
-  hook answers `ask`; whether Claude Code honours that under `auto` and
-  `bypassPermissions` is the claim the probe in `experiments/ask-probe/`
-  checks. Run it before relying on this in either mode.
+- **`ask` holds in auto mode. Verified live on 2026-10-16** (Claude Code
+  2.1.301). With the plugin installed, a `WebFetch` tainted the session and
+  every `Bash`/`Edit` after it showed a permission prompt, even though the
+  session was in auto mode. **`bypassPermissions` is untested.** Run the probe
+  in `experiments/ask-probe/` before relying on this in that mode.
 - **Taint state lives in your temp dir**, one file per session, and is never
   cleaned up by the hook. It is small; your OS's temp cleanup handles it.
 

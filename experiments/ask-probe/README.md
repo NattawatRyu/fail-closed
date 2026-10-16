@@ -21,5 +21,5 @@ table, then update the Limitations section of the top-level README.
 |---|---|---|---|
 | default | | | |
 | acceptEdits | | | |
-| auto | | | |
+| auto | yes | no | **yes** (live install, interactive, 2026-10-16, CC 2.1.301; not via this headless probe) |
 | bypassPermissions | | | |
