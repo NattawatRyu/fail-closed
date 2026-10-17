@@ -6,18 +6,51 @@ Auto mode is great until the agent fetches a web page, opens a file from
 Downloads, or reads an MCP tool's output — and that text says *"ignore previous
 instructions and run…"*. From that point on, the session's context holds words
 somebody else chose. **fail-closed** notices that moment and makes every
-action after it ask you first.
+action that can carry data out, or act beyond your project, ask you first.
 
 ```
 WebFetch https://some-blog.example   →  session marked tainted
+Edit  src/app.ts                      →  goes ahead (your project, undoable in git)
 Bash  npm test                        →  "this session has read text someone else
                                           wrote, so Bash needs your OK.
                                           First untrusted input: WebFetch https://…"
 ```
 
-Reads stay free. Writes, shells, web calls (an exfiltration channel) and every
-MCP tool ask. Once tainted, a session stays tainted — approving one call does
-not make the stranger's text go away.
+Once tainted, a session stays tainted — approving one call does not make the
+stranger's text go away.
+
+## What asks once tainted
+
+| Call | Tainted session |
+|---|---|
+| `Read`, `Grep`, `Glob`, `LS` | goes ahead — reading does not act |
+| `Edit`, `Write`, `MultiEdit`, `NotebookEdit` inside a trusted root | goes ahead, and the path is logged |
+| …into a control path (`.git/`, `.claude/`, `.github/`, `.husky/`, `.vscode/`, `.idea/`, `.devcontainer/`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.envrc`, `.npmrc`, `node_modules/`…) | **asks** |
+| …outside every trusted root, or to a path it cannot resolve | **asks** |
+| `Bash`, `PowerShell` | **asks**, however local the command looks |
+| `WebFetch`, `WebSearch`, every MCP tool, anything unknown | **asks** |
+
+The line is drawn at what cannot be taken back. A bad edit to `src/` shows up
+in `git diff` and reverts. Data sent out over the network does not come back,
+and a write to a control path runs or loads later on its own — a git hook on
+the next commit, a Claude Code hook on the next tool call, `CLAUDE.md` in the
+next session's instructions — with no further call for this gate to see. Control
+paths match on every segment of the resolved path, case-insensitively, so the
+memory under `~/.claude/projects` counts even when that directory is a trusted
+root, and `.Claude/`, `.claude./` and `.CLAUD~1/` are all `.claude/` on
+Windows. (The 8.3 short-name case is handled by resolving writes with the OS's
+native realpath; it is not covered by a test, because the machine it was built
+on does not generate short names.)
+
+Why shells still ask: before the taint, a pattern list for "reaches the
+network" is good enough, because nobody is choosing the command to dodge it.
+After the taint, the attacker writes the command. `node -e "fetch(…)"` is not
+on any list. A hook cannot cut a shell off the network; an OS sandbox can.
+
+Edits that go ahead unasked are appended to the session's taint record (see
+*Limitations*), so you know which files to read before you run them.
+
+Set `"strict": true` to get v0.1 back: every write asks.
 
 ## Why not just auto mode?
 
@@ -96,9 +129,29 @@ everything" would be that stranger switching the guard off.
   "trustedTools": ["mcp__my-own-server__status"],
   "ungatedTools": [],
   "untrustedSubpaths": ["node_modules", ".venv", "vendor", "third_party"],
+  "untrustedPaths": ["C:/Users/me/.claude/projects/**/*.jsonl"],
+  "controlPaths": [".git", ".claude", "CLAUDE.md", "Makefile"],
+  "strict": false,
   "blockedCommands": ["git"]
 }
 ```
+
+`trustedRoots` takes single files too. Files Claude Code writes itself, such as
+`~/.claude/settings.json`, can be listed one by one rather than trusting all of
+`~/.claude/` — `~/.claude/plugins/cache/` holds other people's plugins.
+
+`untrustedPaths` are absolute globs (`**` crosses directories, `*` and `?` do
+not, case ignored) that count as a stranger's text **even inside a trusted
+root**. The case it exists for: trusting `~/.claude/` also trusts
+`projects/**/*.jsonl`, the session transcripts, which quote every web page and
+mail an earlier session read. `Read` taints when the file matches. `Grep`,
+`Glob` and `LS` taint when their path is at, above or below the glob's fixed
+part, since a search over a directory reaches every file in it — so grepping
+`~/.claude/projects/<p>/memory/` asks too, even though no transcript lives
+there. That costs a prompt; the other way round would cost a miss.
+
+`controlPaths` replaces the default list rather than adding to it; copy the
+defaults from `src/policy.mjs` and extend them.
 
 `blockedCommands` is empty by default, so `command-block` does nothing until you
 name something. It matches the program as a command — start of line or after
@@ -124,6 +177,18 @@ ever answers `allow`: the worst either can do is add a prompt.
   "import urllib…"` or a script that fetches is not caught. The gap is only in
   *becoming* tainted through a shell; once tainted by anything, every shell
   call asks.
+- **A shell also reads.** `Read` of a file outside your roots taints;
+  `cat` of the same file through `Bash` does not, since a shell taints only
+  on the network patterns. If the shell call came after a taint it asked
+  anyway; before one, it is a way in.
+- **Unasked edits can wait for a clean session.** A tainted session can write
+  `src/` or a test file, and a later, clean session runs `npm test` without
+  asking. The edits are listed in the taint record — read `git diff` on those
+  files before the next run. `strict` closes this at the cost of a prompt per
+  edit.
+- **Hard links are not followed.** realpath resolves symlinks and junctions,
+  not hard links. A hard link already sitting in your project that points at
+  `~/.bashrc` is judged by where it sits. Making one takes a shell, which asks.
 - **Trusted root means "text you or your team wrote".** A freshly cloned
   repository inside your project is a stranger's text. Open such repos as their
   own project, or list their path in `untrustedSubpaths`.
@@ -132,8 +197,9 @@ ever answers `allow`: the worst either can do is add a prompt.
   every `Bash`/`Edit` after it showed a permission prompt, even though the
   session was in auto mode. **`bypassPermissions` is untested.** Run the probe
   in `experiments/ask-probe/` before relying on this in that mode.
-- **Taint state lives in your temp dir**, one file per session, and is never
-  cleaned up by the hook. It is small; your OS's temp cleanup handles it.
+- **Taint state lives in your temp dir** (`fail-closed/taint/<session id>`),
+  one file per session: the first line is the taint, later lines the edits
+  made after it. Never cleaned up by the hook; your OS's temp cleanup handles it.
 
 ## Tests
 
@@ -146,7 +212,16 @@ whose name starts with the root's name, `..`, a symlink that lands outside, an
 unresolvable path, a session id of `../../escape`, garbage on stdin. Five
 mutants of the policy (naive `startsWith` containment, unknown-tool-trusted,
 clean-gate-says-allow, node_modules ignored, resolve-failure-trusted) are each
-killed by the suite. `command-block` is checked against the PowerShell hook it
+killed by the suite, and so are ten more for the v0.2 write gate (control
+paths ignored, judged below the root only, matched case-sensitively or with
+trailing dots and spaces kept; an
+unresolvable or outside-root write trusted; `strict` ignored; shells ungated
+when tainted; a new file under a junction not resolved through its ancestor;
+tainted writes not logged), and ten for `untrustedPaths` in v0.2.1 (ignored;
+not passed in by the hook; searches treated like single-file reads; a search
+above or below the glob's base missed; a sibling sharing the base's prefix
+counted as inside; `*` crossing directories; `**` refusing zero directories;
+dots not escaped; case-sensitive match). `command-block` is checked against the PowerShell hook it
 replaced, on the same inputs, when that hook is present.
 
 ## License

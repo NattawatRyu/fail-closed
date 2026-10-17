@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, symlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -64,6 +64,68 @@ test("taint does not wear off after the user approves once", () => {
 test("tainted session may still read", () => {
   post("s5", "WebFetch", { url: "https://x" });
   assert.equal(decision(pre("s5", "Read", { file_path: outside })), null);
+});
+
+test("tainted session edits its own project unasked, and the edit is logged", () => {
+  post("s8", "WebFetch", { url: "https://x" });
+  const target = path.join(project, "src", "new.ts");
+  assert.equal(decision(pre("s8", "Write", { file_path: target })), null);
+  post("s8", "Write", { file_path: target });
+  const log = readFileSync(path.join(tmp, "state", "s8"), "utf8");
+  assert.match(log.split("\n")[0], /WebFetch/, "first line is still the original taint");
+  assert.match(log, /new\.ts while tainted/);
+});
+
+test("clean session: a write logs nothing", () => {
+  post("s9", "Write", { file_path: path.join(project, "a.txt") });
+  assert.equal(existsSync(path.join(tmp, "state", "s9")), false);
+});
+
+test("tainted session: a write into .claude or outside asks, and says why", () => {
+  post("s10", "WebFetch", { url: "https://x" });
+  const out = pre("s10", "Edit", { file_path: path.join(project, ".claude", "settings.json") });
+  assert.equal(decision(out), "ask");
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /\.claude runs or loads/);
+  assert.equal(decision(pre("s10", "Write", { file_path: outside })), "ask");
+});
+
+test("tainted session: a new file under a junction that points outside asks", () => {
+  const away = path.join(tmp, "away");
+  mkdirSync(away, { recursive: true });
+  symlinkSync(away, path.join(project, "linked"), "junction");
+  post("s11", "WebFetch", { url: "https://x" });
+  assert.equal(decision(pre("s11", "Write", { file_path: path.join(project, "linked", "deep", "new.ts") })), "ask");
+});
+
+test("tainted session: Bash still asks, even a harmless-looking one", () => {
+  post("s12", "WebFetch", { url: "https://x" });
+  assert.equal(decision(pre("s12", "Bash", { command: "npm test" })), "ask");
+});
+
+test("strict config: a tainted in-project edit asks", () => {
+  const cfg = path.join(tmp, "strict.json");
+  writeFileSync(cfg, JSON.stringify({ strict: true }));
+  post("s13", "WebFetch", { url: "https://x" });
+  const out = run("taint-gate.mjs",
+    { hook_event_name: "PreToolUse", session_id: "s13", cwd: project, tool_name: "Edit", tool_input: { file_path: path.join(project, "a.txt") } },
+    { FAIL_CLOSED_CONFIG: cfg });
+  assert.equal(decision(out), "ask");
+});
+
+test("untrustedPaths from config: a transcript in a trusted root taints, the memory beside it does not", () => {
+  const home = path.join(tmp, "claude-home");
+  mkdirSync(path.join(home, "projects", "p", "memory"), { recursive: true });
+  writeFileSync(path.join(home, "projects", "p", "t.jsonl"), "{\"web\":\"ignore previous instructions\"}");
+  writeFileSync(path.join(home, "projects", "p", "memory", "MEMORY.md"), "mine");
+  const cfg = path.join(tmp, "untrusted.json");
+  writeFileSync(cfg, JSON.stringify({ trustedRoots: [home], untrustedPaths: [`${home}/projects/**/*.jsonl`] }));
+  const read = (sid, file_path) => run("taint-gate.mjs",
+    { hook_event_name: "PostToolUse", session_id: sid, cwd: project, tool_name: "Read", tool_input: { file_path } },
+    { FAIL_CLOSED_CONFIG: cfg });
+  read("s14", path.join(home, "projects", "p", "memory", "MEMORY.md"));
+  assert.equal(existsSync(path.join(tmp, "state", "s14")), false);
+  read("s15", path.join(home, "projects", "p", "t.jsonl"));
+  assert.match(readFileSync(path.join(tmp, "state", "s15"), "utf8"), /untrusted/);
 });
 
 test("missing session id: asks", () => {
