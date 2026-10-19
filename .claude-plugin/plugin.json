@@ -1,6 +1,6 @@
 {
   "name": "fail-closed",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Claude Code hooks that fail closed: once a session reads text a stranger wrote, every action that can send data out or act beyond the project asks first. Plus a command block that catches chained commands.",
   "author": { "name": "Nattawat Chimin" },
   "license": "MIT",

@@ -5,7 +5,7 @@
 //
 // It never answers "allow". The worst this hook can do is add a prompt; it
 // cannot remove one that Claude Code would otherwise have shown.
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { taintReason, gateDecision, writeRisk, WRITERS } from "../src/policy.mjs";
 import { emit, loadConfig, markTainted, readStdinJson, taintRecord } from "../src/io.mjs";
@@ -82,6 +82,9 @@ try {
       untrustedSubpaths: cfg.untrustedSubpaths,
       untrustedPaths: cfg.untrustedPaths,
       trustedTools: cfg.trustedTools,
+      trustedHosts: cfg.trustedHosts,
+      // Any doubt reads as "not a file", which keeps the wider directory rule.
+      isFile: (p) => { try { return statSync(p).isFile(); } catch { return false; } },
       resolve: (p) => {
         const abs = path.resolve(cwd, p);
         try {

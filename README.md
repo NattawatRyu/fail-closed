@@ -111,8 +111,9 @@ Needs Node 18+. No dependencies.
 |---|---|
 | `Read`, `Grep`, `Glob`, `LS`, `NotebookRead` | the path resolves (symlinks followed) outside a trusted root, or into `node_modules/`, `.venv/`, `vendor/` |
 | `WebFetch`, `WebSearch` | always |
-| `Bash`, `PowerShell` | the command reaches the network (`curl`, `wget`, `Invoke-WebRequest`, `git clone/pull`, `gh api`, …) |
+| `Bash`, `PowerShell`, `Monitor` | the command reaches the network (`curl`, `wget`, `Invoke-WebRequest`, `git clone/pull`, `gh api`, …), unless every fetch goes to a host in `trustedHosts` |
 | `Edit`, `Write`, `Agent`, `TodoWrite`, … | never — this is the session's own text |
+| `TaskOutput`, `TaskStop`, `ScheduleWakeup`, `Cron*`, `EnterWorktree`, … | never — harness tools that only touch the session's own background tasks, schedule and worktrees |
 | **anything else, every MCP tool included** | **always** — a tool this policy has never heard of is the dangerous case |
 
 Trusted root = the project directory (`CLAUDE_PROJECT_DIR`), plus any you add.
@@ -127,6 +128,7 @@ everything" would be that stranger switching the guard off.
 {
   "trustedRoots": ["D:/work/notes"],
   "trustedTools": ["mcp__my-own-server__status"],
+  "trustedHosts": ["localhost", "127.0.0.1", "[::1]"],
   "ungatedTools": [],
   "untrustedSubpaths": ["node_modules", ".venv", "vendor", "third_party"],
   "untrustedPaths": ["C:/Users/me/.claude/projects/**/*.jsonl"],
@@ -149,6 +151,19 @@ mail an earlier session read. `Read` taints when the file matches. `Grep`,
 part, since a search over a directory reaches every file in it — so grepping
 `~/.claude/projects/<p>/memory/` asks too, even though no transcript lives
 there. That costs a prompt; the other way round would cost a miss.
+
+A `Grep` or `Glob` pointed at one file reaches only that file, so it is judged
+like `Read`: grepping `memory/MEMORY.md` does not ask, grepping `memory/` does.
+
+`trustedHosts` is empty by default: polling your own dev server is still a
+fetch, and a dev server can serve text it fetched from somewhere else. Name
+hosts here only for servers whose output you would trust as your own. A command
+passes only when every fetch in it names a trusted URL and nothing else that
+could be a host — no second URL, no dotted name, no `host:port`, no `$VAR` —
+and only plain flags beside it. `curl -s -o /dev/null -w "%{http_code}"
+http://localhost:5055/` passes; add `-d @body.json` or `-o page.html` and it
+taints. `git`, `gh`, `npm` and `pip` never pass. It changes what taints a
+session, never what a tainted session asks for.
 
 `controlPaths` replaces the default list rather than adding to it; copy the
 defaults from `src/policy.mjs` and extend them.

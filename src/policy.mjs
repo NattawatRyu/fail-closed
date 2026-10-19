@@ -18,6 +18,13 @@ export const TRUSTED_TOOLS = new Set([
   // A subagent's own tool calls go through these same hooks, so whatever it read
   // taints the session at the read, not at the summary it hands back.
   "Agent", "Task",
+  // Harness built-ins that only touch the session's own work: background tasks
+  // it started (their commands were judged when they ran), its own schedule,
+  // its own worktrees, notes to the owner.
+  "TaskOutput", "BashOutput", "TaskStop", "KillShell",
+  "ScheduleWakeup", "CronCreate", "CronDelete", "CronList",
+  "PushNotification", "EnterWorktree", "ExitWorktree",
+  "SendFeedback", "ReportFindings", "EndConversation",
 ]);
 
 /** Readers whose output is trusted only when the path is inside a trusted root. */
@@ -26,11 +33,15 @@ export const PATH_READERS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead
 /** Shells. Their output is trusted unless the command reaches the network. */
 export const SHELLS = new Set(["Bash", "PowerShell"]);
 
+/** Not shells by name, but they run a `command` all the same: judged like one. */
+export const COMMAND_RUNNERS = new Set(["Monitor"]);
+
 /** Tools that may still run unasked in a tainted session: they read, they do not act. */
 export const READ_ONLY = new Set([
   "Read", "Grep", "Glob", "LS", "NotebookRead",
   "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
   "AskUserQuestion", "ToolSearch", "EnterPlanMode", "ExitPlanMode",
+  "TaskOutput", "BashOutput", "CronList",
 ]);
 
 /**
@@ -38,8 +49,49 @@ export const READ_ONLY = new Set([
  * known hole in this design: a shell can reach the network in ways no pattern
  * lists. Documented as such in the README rather than pretended away.
  */
-const NETWORK_COMMAND =
-  /(?:^|[\s;&|(`]|\$\()(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod|http|https|xh|aria2c|gh\s+(?:api|issue|pr|release|gist)|git\s+(?:clone|fetch|pull)|npm\s+(?:view|info)|pip\s+download)(?:\.exe)?(?=\s|$)/i;
+const FETCHERS = String.raw`curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod|http|https|xh|aria2c`;
+const NET_TOOLS = String.raw`gh\s+(?:api|issue|pr|release|gist)|git\s+(?:clone|fetch|pull)|npm\s+(?:view|info)|pip\s+download`;
+const asCommand = (names) => new RegExp(String.raw`(?:^|[\s;&|(\x60]|\$\()(?:${names})(?:\.exe)?(?=\s|$)`, "i");
+const NETWORK_COMMAND = asCommand(`${FETCHERS}|${NET_TOOLS}`);
+const URL_FETCHER = asCommand(FETCHERS);
+const NETWORK_TOOL = asCommand(NET_TOOLS);
+
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Does every network call in this command go only to `trustedHosts` - the
+ * owner's own dev servers? Each segment that fetches must name a trusted URL,
+ * and once that is cut out every word left must be plain: a flag, a bare word,
+ * a number. A dotted name, `host:port`, another `://`, a `$var` or `%VAR%` that
+ * could expand to a URL - any of those and the command stays tainted.
+ * git/gh/npm/pip never pass. `-OutFile page.html` costs a prompt, never a miss.
+ */
+const PLAIN_WORD = /^(?:-{1,2}[A-Za-z][\w-]*|[A-Za-z][\w-]*|\d+)$/;
+
+export function onlyTrustedHosts(cmd, hosts) {
+  if (typeof cmd !== "string" || !hosts?.length) return false;
+  const h = hosts.map((x) => reEscape(String(x).toLowerCase())).join("|");
+  const url = new RegExp(
+    String.raw`(?:(?<=^|[\s"'])|\bhttps?://)(?:${h})(?::\d+)?(?=[/?#\s"']|$)(?:[/?#][^\s"']*)?`,
+    "gi",
+  );
+  // curl's -w format ("%{http_code}") is printed locally; its braces would
+  // otherwise split the segment. Kept when it names a fetcher, so it is judged.
+  const local = cmd.replace(/(^|\s)(?:-w|--write-out)\s+("[^"]*"|'[^']*'|\S+)/g, (m, pre, v) =>
+    NETWORK_COMMAND.test(v) ? m : pre);
+  let fetched = false;
+  for (const seg of local.split(/[;&|\n(){}\x60]+/)) {
+    if (NETWORK_TOOL.test(seg)) return false;
+    if (!URL_FETCHER.test(seg)) continue;
+    const rest = seg.replace(url, " ");
+    if (rest === seg) return false;
+    // Throwing the body away is not a fetch from anywhere; any other target is a word to judge.
+    const words = rest.replace(/["']/g, " ").replace(/(?:^|\s)(?:\d?>>?|-o|--output|-OutFile)\s*(?:\/dev\/null|\$null|nul)(?=\s|$)/gi, " ").trim().split(/\s+/).filter(Boolean);
+    if (!words.every((w) => PLAIN_WORD.test(w))) return false;
+    fetched = true;
+  }
+  return fetched;
+}
 
 /** Subdirectories of a trusted root that hold other people's text anyway. */
 export const DEFAULT_UNTRUSTED_SUBPATHS = ["node_modules", ".venv", "vendor"];
@@ -83,11 +135,13 @@ const insideNorm = (root, p) => p === root || p.startsWith(root.endsWith("/") ? 
  * glob's base, or anywhere under that base, counts too. That last case can ask
  * for a search that would have found no match; it cannot miss one that would.
  */
-function untrustedGlobHit(toolName, resolved, globs) {
+function untrustedGlobHit(toolName, resolved, globs, isFile) {
   const p = norm(resolved);
+  // A search pointed at one file reaches that file and nothing under it.
+  const single = toolName === "Read" || toolName === "NotebookRead" || isFile?.(resolved) === true;
   for (const g of globs ?? []) {
     if (globRegex(g).test(p)) return g;
-    if (toolName === "Read" || toolName === "NotebookRead") continue;
+    if (single) continue;
     const base = globBase(g);
     if (insideNorm(p, base) || insideNorm(base, p)) return g;
   }
@@ -110,6 +164,8 @@ export function isInside(root, p, pathApi = path) {
  *   ctx.trustedTools       extra tool names the owner vouches for (user config)
  *   ctx.cwd                where a reader with no path argument looks
  *   ctx.resolve(p)         absolute, symlink-resolved path; may throw
+ *   ctx.isFile(p)          optional: true only when p is a regular file
+ *   ctx.trustedHosts       hosts a shell may fetch from without tainting (opt-in)
  */
 export function taintReason(toolName, input, ctx) {
   input = input ?? {};
@@ -127,7 +183,7 @@ export function taintReason(toolName, input, ctx) {
     // Checked before the roots: a trusted root can hold someone else's text,
     // like the transcripts under ~/.claude/projects that quote every web page
     // an earlier session fetched.
-    const glob = untrustedGlobHit(toolName, resolved, ctx.untrustedPaths);
+    const glob = untrustedGlobHit(toolName, resolved, ctx.untrustedPaths, ctx.isFile);
     if (glob) return `${toolName} reaches untrusted ${glob}: ${resolved}`;
     const root = ctx.trustedRoots.find((r) => isInside(r, resolved));
     if (!root) return `${toolName} outside trusted roots: ${resolved}`;
@@ -137,9 +193,13 @@ export function taintReason(toolName, input, ctx) {
     return null;
   }
 
-  if (SHELLS.has(toolName)) {
+  if (SHELLS.has(toolName) || COMMAND_RUNNERS.has(toolName)) {
+    if (COMMAND_RUNNERS.has(toolName) && typeof input.command !== "string") {
+      return `${toolName}: no command to judge - assumed untrusted`;
+    }
     const cmd = typeof input.command === "string" ? input.command : "";
-    return NETWORK_COMMAND.test(cmd) ? `${toolName} reached the network: ${cmd.slice(0, 120)}` : null;
+    if (!NETWORK_COMMAND.test(cmd) || onlyTrustedHosts(cmd, ctx.trustedHosts)) return null;
+    return `${toolName} reached the network: ${cmd.slice(0, 120)}`;
   }
 
   if (toolName === "WebFetch") return `WebFetch ${input.url ?? ""}`.trim();
